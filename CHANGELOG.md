@@ -4,6 +4,13 @@ All notable changes to bastiontrace are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-11
+
+Depend on [bastioncorpus](https://github.com/Rinkia/bastioncorpus), the shared
+trilogy corpus, for injection signatures. The built-in `_PATTERNS` markers stay
+as an always-available fallback; when bastioncorpus is installed, `to_trace`
+signatures extend recall. No API change.
+
 ## [0.1.0] - 2026-09-11
 
 Initial release. The investigate side of the bastion trilogy (agentbastion

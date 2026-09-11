@@ -18,9 +18,10 @@ from typing import Optional
 
 from .trace_schema import Message, ToolCall, ToolResult, Trace
 
-# ponytail: minimal built-in injection markers. High-signal, deliberately small.
-# Upgrade path: import bastionprobe.corpus patterns when it needs real recall.
-_PATTERNS: tuple[tuple[str, str], ...] = (
+# Minimal built-in injection markers. High-signal, deliberately small. Real
+# recall comes from bastioncorpus (the shared trilogy corpus) when installed;
+# these built-ins are the always-available fallback.
+_BUILTIN_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"ignore (all )?(previous|prior|above)", "instruction-override"),
     (r"disregard (the )?(previous|prior|above)", "instruction-override"),
     (r"system\s*[:>]", "role-confusion"),
@@ -28,6 +29,24 @@ _PATTERNS: tuple[tuple[str, str], ...] = (
     (r"new instructions?", "instruction-override"),
     (r"do not (tell|inform|mention)", "concealment"),
 )
+
+
+def _load_patterns() -> tuple[tuple[str, str], ...]:
+    """Built-in markers plus bastioncorpus signatures (literal substrings, so
+    they are regex-escaped). Falls back to built-ins alone if bastioncorpus is
+    unavailable."""
+    pats = list(_BUILTIN_PATTERNS)
+    try:
+        from bastioncorpus import load_corpus, to_trace
+
+        for sig in to_trace(load_corpus()):
+            pats.append((re.escape(sig["pattern"]), sig["category"]))
+    except Exception:  # noqa: BLE001 - corpus is an enhancer, never a hard requirement
+        pass
+    return tuple(pats)
+
+
+_PATTERNS = _load_patterns()
 _COMPILED = tuple((re.compile(p, re.I), cat) for p, cat in _PATTERNS)
 
 

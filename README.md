@@ -12,7 +12,9 @@ The investigate side of the **bastion trilogy**:
 | [bastionprobe](https://github.com/Rinkia/bastionprobe) | **attack** | which injections land? |
 | **bastiontrace** | **investigate** | where did it get in, and what did it do? |
 
-No LLM, no cloud, no dependencies. Pure analysis over a JSONL trace.
+No LLM, no cloud. One small pure-Python dependency —
+[bastioncorpus](https://github.com/Rinkia/bastioncorpus), the shared trilogy
+corpus that supplies the injection signatures. Pure analysis over a JSONL trace.
 
 ## Install
 
