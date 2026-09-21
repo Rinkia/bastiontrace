@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bastiontrace"
-version = "0.2.0"
+version = "0.3.0"
 description = "Forensics for injected AI agents: read a tool-call trace, locate the prompt injection, and map its blast radius. Investigate side of the bastion trilogy (agentbastion + bastionprobe)."
 readme = "README.md"
 requires-python = ">=3.10"

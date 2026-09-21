@@ -15,7 +15,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional, Union
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: added the `memory` event (agent memory/summary layer)
 
 
 # --- events -----------------------------------------------------------------
@@ -59,9 +59,26 @@ class ToolCall:
     type: str = "tool_call"
 
 
-Event = Union[Message, ToolResult, ToolCall]
+@dataclass(frozen=True)
+class MemoryNote:
+    """Content in the agent's OWN memory/summary layer — a compaction summary, a
+    persisted note, a RAG chunk it stored. An injection can hide here without ever
+    passing through a tool_result (BASTION_INTEL A1). `source_seq` records where the
+    summary was compacted from, so a poisoned summary still carries provenance."""
 
-_EVENT_TYPES = {"message": Message, "tool_result": ToolResult, "tool_call": ToolCall}
+    seq: int
+    content: str
+    kind: str = "summary"  # summary | memory | note
+    source_seq: Optional[int] = None
+    category: str = ""
+    tactic: str = ""
+    type: str = "memory"
+
+
+Event = Union[Message, ToolResult, ToolCall, MemoryNote]
+
+_EVENT_TYPES = {"message": Message, "tool_result": ToolResult,
+                "tool_call": ToolCall, "memory": MemoryNote}
 
 
 # --- trace ------------------------------------------------------------------

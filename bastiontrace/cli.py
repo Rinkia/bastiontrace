@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .analyzer import Finding, analyze
 from .harden import analyze_files, build_hardening, render_report, write_hardening
-from .trace_schema import Message, ToolCall, ToolResult, Trace, from_jsonl
+from .trace_schema import MemoryNote, Message, ToolCall, ToolResult, Trace, from_jsonl
 
 _VERDICT_MARK = {"LANDED": "[LANDED]", "ATTEMPTED": "[attempted]", "CLEAN": "[clean]"}
 
@@ -33,6 +33,8 @@ def _fmt_event(trace: Trace, f: Finding, seq: int) -> str:
         body = f"{e.role}: {e.content[:80]}"
     elif isinstance(e, ToolResult):
         body = f"tool_result {e.tool!r}: {e.content[:70]}"
+    elif isinstance(e, MemoryNote):
+        body = f"memory({e.kind}): {e.content[:66]}"
     elif isinstance(e, ToolCall):
         body = f"tool_call {e.tool!r} args={e.args}"
     else:
