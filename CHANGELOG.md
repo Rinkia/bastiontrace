@@ -4,6 +4,17 @@ All notable changes to bastiontrace are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-21
+
+Added `memory` as a second inject-point type — schema **v1 → v2** (BASTION_INTEL A1).
+
+- New `MemoryNote` event (`type: "memory"`, `kind`: summary|memory|note) models the
+  agent's own memory/summary layer, where compaction-summary injections hide without
+  passing through a `tool_result`. The analyzer scans it as a candidate inject site
+  and honors its `source_seq` for causal-path + blast-radius provenance.
+- CLI renders memory events; `SCHEMA.md` documents the type. Backward-compatible:
+  v1 traces (no memory events) parse unchanged.
+
 ## [0.2.0] - 2026-09-11
 
 Depend on [bastioncorpus](https://github.com/Rinkia/bastioncorpus), the shared

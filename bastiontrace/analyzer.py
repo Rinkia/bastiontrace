@@ -1,13 +1,14 @@
 """The wedge: read a trace, answer where the injection got in and what it caused.
 
 Four derivations (see SCHEMA.md):
-  1. inject point  - first tool_result carrying a canary token or a corpus pattern.
+  1. inject point  - first tool_result OR memory/summary note carrying a canary
+                     token or a corpus pattern.
   2. landing       - first forbidden tool_call (action) or leaked canary in a
                      reply (leak). Earliest wins.
   3. causal path   - walk args_from backward from landing to inject.
   4. blast radius  - forward taint closure over args_from from the inject.
 
-No LLM. Pure trace analysis over the v1 schema.
+No LLM. Pure trace analysis over the v2 schema.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .trace_schema import Message, ToolCall, ToolResult, Trace
+from .trace_schema import MemoryNote, Message, ToolCall, ToolResult, Trace
 
 # Minimal built-in injection markers. High-signal, deliberately small. Real
 # recall comes from bastioncorpus (the shared trilogy corpus) when installed;
@@ -75,14 +76,20 @@ class Finding:
 def _find_inject(trace: Trace) -> tuple[Optional[int], str]:
     tokens = tuple(trace.policy.canary_tokens) or ((trace.canary,) if trace.canary else ())
     for e in trace.events:
-        if not isinstance(e, ToolResult):
+        # The injection hides in content the agent READ: external tool output, or
+        # its own memory/summary layer (A1). Both are candidate inject sites.
+        if isinstance(e, ToolResult):
+            where = f"in {e.tool!r} output"
+        elif isinstance(e, MemoryNote):
+            where = f"in {e.kind} memory"
+        else:
             continue
         for tok in tokens:
             if tok and tok in e.content:
-                return e.seq, f"canary token {tok!r} in {e.tool!r} output"
+                return e.seq, f"canary token {tok!r} {where}"
         for rx, cat in _COMPILED:
             if rx.search(e.content):
-                return e.seq, f"pattern {cat!r} in {e.tool!r} output"
+                return e.seq, f"pattern {cat!r} {where}"
     return None, ""
 
 
@@ -120,7 +127,7 @@ def _causal_path(trace: Trace, inject_seq: int, landing_seq: int) -> tuple[tuple
         srcs: tuple[int, ...] = ()
         if isinstance(e, ToolCall) and e.args_from:
             srcs = e.args_from
-        elif isinstance(e, ToolResult) and e.source_seq is not None:
+        elif isinstance(e, (ToolResult, MemoryNote)) and e.source_seq is not None:
             srcs = (e.source_seq,)
         for s in srcs:
             if s in seen:
@@ -153,7 +160,7 @@ def _blast_radius(trace: Trace, inject_seq: int) -> tuple[int, ...]:
             srcs: tuple[int, ...] = ()
             if isinstance(e, ToolCall) and e.args_from:
                 srcs = e.args_from
-            elif isinstance(e, ToolResult) and e.source_seq is not None:
+            elif isinstance(e, (ToolResult, MemoryNote)) and e.source_seq is not None:
                 srcs = (e.source_seq,)
             if any(s in tainted for s in srcs):
                 tainted.add(e.seq)
