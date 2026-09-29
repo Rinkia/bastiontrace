@@ -12,6 +12,7 @@ from bastiontrace.harden import _policy_yaml
 
 def test_policy_has_contract_keys():
     out = _policy_yaml(["send_email", "http_post"])
+    assert out.count("policy_version: 2") == 1
     assert "default: allow" in out
     assert "deny:" in out
     assert "- send_email" in out and "- http_post" in out
@@ -19,4 +20,5 @@ def test_policy_has_contract_keys():
 
 def test_empty_denylist_still_valid_shape():
     out = _policy_yaml([])
-    assert "default: allow" in out and "deny:" in out
+    assert "policy_version: 2" in out and "default: allow" in out
+    assert "deny: []" in out  # an empty list, not YAML null

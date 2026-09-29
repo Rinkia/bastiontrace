@@ -4,6 +4,15 @@ All notable changes to bastiontrace are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-29
+
+`harden` emits a `policy_version: 2` policy.yaml.
+
+- Same decisions (default allow + the tools an injection got called on a deny list);
+  the file now starts with `policy_version: 2`, and an empty deny list is written
+  `deny: []`. Every agentbastion and bastiongate version reads it (it uses only the
+  shared core), so no consumer upgrade is needed.
+
 ## [0.3.0] - 2026-09-21
 
 Added `memory` as a second inject-point type — schema **v1 → v2** (BASTION_INTEL A1).
