@@ -8,7 +8,9 @@ finding back into agentbastion defenses.
 
 from .analyzer import Finding, analyze
 from .harden import Hardening, analyze_files, build_hardening, write_hardening
+from .otel import ImportResult, from_otel
 from .trace_schema import (
+    AgentMessage,
     Message,
     Policy,
     ToolCall,
@@ -18,7 +20,7 @@ from .trace_schema import (
     from_jsonl,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "analyze",
@@ -30,6 +32,9 @@ __all__ = [
     "ToolCall",
     "from_jsonl",
     "from_bastionprobe",
+    "from_otel",
+    "ImportResult",
+    "AgentMessage",
     "Hardening",
     "build_hardening",
     "write_hardening",

