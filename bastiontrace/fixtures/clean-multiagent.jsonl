@@ -1,0 +1,7 @@
+{"type": "trace", "v": 3, "trace_id": "clean-1", "source": "hand", "policy": {"forbidden_tools": ["send_email"]}}
+{"type": "message", "seq": 0, "role": "user", "agent": "planner", "content": "Plan a trip to Rome."}
+{"type": "agent_message", "seq": 1, "from_agent": "planner", "to_agent": "flights", "kind": "delegate", "content": "Find flights to Rome for May 3.", "derived_from": [0]}
+{"type": "tool_call", "seq": 2, "tool": "search_flights", "agent": "flights", "args": {"to": "FCO"}, "args_from": [1]}
+{"type": "tool_result", "seq": 3, "tool": "search_flights", "agent": "flights", "source_seq": 2, "content": "AZ 609 departs 10:05, 180 EUR."}
+{"type": "agent_message", "seq": 4, "from_agent": "flights", "to_agent": "planner", "kind": "reply", "content": "Best: AZ 609, 180 EUR.", "derived_from": [3]}
+{"type": "message", "seq": 5, "role": "assistant", "agent": "planner", "content": "Book AZ 609 at 180 EUR?"}

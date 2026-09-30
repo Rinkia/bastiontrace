@@ -1,8 +1,13 @@
 """bastiontrace trace schema (v1).
 
 A trace is one agent run recorded as JSONL: line 1 is the `trace` header, every
-later line is one ordered event (`message`, `tool_result`, `tool_call`). See
-SCHEMA.md for the wire format. This module is the in-memory model plus JSONL
+later line is one ordered event (`message`, `tool_result`, `tool_call`, `memory`,
+`agent_message`). See SCHEMA.md for the wire format.
+
+v3 (multi-agent) is additive: every event may name the `agent` that read or made
+it, `agent_message` records content one agent handed another, and the header may
+say `provenance: inferred` (edges reconstructed, e.g. from an OTel span tree). A
+trace that uses none of that is still written as v2, byte-identical to before. This module is the in-memory model plus JSONL
 (de)serialization and the bastionprobe adapter.
 
 Decoupled on purpose: `from_bastionprobe` takes a duck-typed result (anything
@@ -15,7 +20,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional, Union
 
-SCHEMA_VERSION = 2  # v2: added the `memory` event (agent memory/summary layer)
+SCHEMA_VERSION = 3  # newest this reader understands; v3 = multi-agent (agent, agent_message)
+_BASE_VERSION = 2  # what a trace without v3 features is written as
 
 
 # --- events -----------------------------------------------------------------
@@ -31,6 +37,7 @@ class Message:
     seq: int
     role: str  # user | assistant | system
     content: str
+    agent: str = ""  # v3: the agent this message belongs to ("" = the single/root agent)
     type: str = "message"
 
 
@@ -44,6 +51,7 @@ class ToolResult:
     source_seq: Optional[int] = None
     category: str = ""
     tactic: str = ""
+    agent: str = ""  # v3: the agent that read this output
     type: str = "tool_result"
 
 
@@ -56,6 +64,7 @@ class ToolCall:
     args: dict[str, Any] = field(default_factory=dict)
     # None = provenance unknown (fall back to token/pattern match).
     args_from: Optional[tuple[int, ...]] = None
+    agent: str = ""  # v3: the agent that made this call
     type: str = "tool_call"
 
 
@@ -72,13 +81,47 @@ class MemoryNote:
     source_seq: Optional[int] = None
     category: str = ""
     tactic: str = ""
+    agent: str = ""  # v3: the agent whose memory this is
     type: str = "memory"
 
 
-Event = Union[Message, ToolResult, ToolCall, MemoryNote]
+@dataclass(frozen=True)
+class AgentMessage:
+    """v3: content one agent handed another (a delegated task, a reply, a
+    broadcast). The receiving agent READ it, so it is both a candidate inject
+    site and a propagation edge between agents."""
+
+    seq: int
+    from_agent: str
+    to_agent: str
+    content: str
+    kind: str = "delegate"  # delegate | reply | broadcast
+    # seqs this message was built from (the sender's reads); None = unknown
+    derived_from: Optional[tuple[int, ...]] = None
+    type: str = "agent_message"
+
+    @property
+    def agent(self) -> str:
+        """The reading agent (the receiver)."""
+        return self.to_agent
+
+
+Event = Union[Message, ToolResult, ToolCall, MemoryNote, AgentMessage]
 
 _EVENT_TYPES = {"message": Message, "tool_result": ToolResult,
-                "tool_call": ToolCall, "memory": MemoryNote}
+                "tool_call": ToolCall, "memory": MemoryNote, "agent_message": AgentMessage}
+_TUPLE_FIELDS = ("args_from", "derived_from")
+
+
+def edges_of(e: Event) -> tuple[int, ...]:
+    """The seqs an event derives from (its provenance edges)."""
+    if isinstance(e, ToolCall):
+        return tuple(e.args_from or ())
+    if isinstance(e, AgentMessage):
+        return tuple(e.derived_from or ())
+    if isinstance(e, (ToolResult, MemoryNote)) and e.source_seq is not None:
+        return (e.source_seq,)
+    return ()
 
 
 # --- trace ------------------------------------------------------------------
@@ -90,7 +133,8 @@ class Trace:
     source: str = ""
     canary: str = ""
     policy: Policy = field(default_factory=Policy)
-    v: int = SCHEMA_VERSION
+    v: int = _BASE_VERSION
+    provenance: str = "explicit"  # explicit | inferred (edges reconstructed, not recorded)
 
     def by_seq(self, seq: int) -> Optional[Event]:
         for e in self.events:
@@ -103,7 +147,8 @@ class Trace:
     def to_lines(self) -> list[str]:
         header = {
             "type": "trace",
-            "v": self.v,
+            # v3 only when v3 features are used; otherwise keep the version as loaded
+            "v": 3 if _needed_version(self) == 3 and self.v < 3 else self.v,
             "trace_id": self.trace_id,
         }
         if self.source:
@@ -113,6 +158,8 @@ class Trace:
         pol = _drop_empty(asdict(self.policy))
         if pol:
             header["policy"] = pol
+        if self.provenance != "explicit":
+            header["provenance"] = self.provenance
         lines = [json.dumps(header, ensure_ascii=False)]
         for e in self.events:
             lines.append(json.dumps(_drop_empty(asdict(e)), ensure_ascii=False))
@@ -120,6 +167,14 @@ class Trace:
 
     def to_jsonl(self) -> str:
         return "\n".join(self.to_lines()) + "\n"
+
+
+def _needed_version(trace: "Trace") -> int:
+    """v3 only when the trace uses a v3 feature, so single-agent traces (and the
+    bastionprobe contract golden) stay v2 byte-for-byte."""
+    uses_v3 = trace.provenance != "explicit" or any(
+        isinstance(e, AgentMessage) or getattr(e, "agent", "") for e in trace.events)
+    return 3 if uses_v3 else _BASE_VERSION
 
 
 def _drop_empty(d: dict[str, Any]) -> dict[str, Any]:
@@ -142,14 +197,45 @@ def _event_from_dict(d: dict[str, Any]) -> Event:
     etype = d.get("type")
     cls = _EVENT_TYPES.get(etype)
     if cls is None:
-        raise ValueError(f"unknown event type {etype!r}")
+        raise ValueError(f"unknown event type {etype!r}: this trace may come from a newer "
+                         "bastiontrace; pip install -U bastiontrace")
     if "seq" not in d:
         raise ValueError(f"event missing seq: {d!r}")
-    if cls is ToolCall and isinstance(d.get("args_from"), list):
-        d = {**d, "args_from": tuple(d["args_from"])}
+    for key in _TUPLE_FIELDS:
+        if d.get(key) is None:
+            continue
+        if not isinstance(d[key], list) or not all(_is_int(x) for x in d[key]):
+            raise ValueError(f"event seq {d.get('seq')!r}: `{key}` must be a list of seqs, got {d[key]!r}")
+        d = {**d, key: tuple(d[key])}
     # keep only fields the dataclass knows (forward-compat: ignore extras)
     known = cls.__dataclass_fields__.keys()
-    return cls(**{k: v for k, v in d.items() if k in known})
+    try:
+        event = cls(**{k: v for k, v in d.items() if k in known})
+    except TypeError as e:  # a required field is missing
+        raise ValueError(f"bad {etype} event {d!r}: {e}") from e
+    _check_types(event)
+    return event
+
+
+_STR_FIELDS = ("role", "content", "tool", "agent", "category", "tactic", "kind", "from_agent", "to_agent")
+
+
+def _is_int(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _check_types(e: Event) -> None:
+    """Hostile JSON must fail as a ValueError naming the field, never a TypeError later."""
+    if not _is_int(e.seq):
+        raise ValueError(f"event seq must be an integer, got {e.seq!r}")
+    for name in _STR_FIELDS:
+        if name in type(e).__dataclass_fields__ and not isinstance(getattr(e, name), str):
+            raise ValueError(f"event seq {e.seq}: `{name}` must be a string, got {getattr(e, name)!r}")
+    source = getattr(e, "source_seq", None)
+    if source is not None and not _is_int(source):
+        raise ValueError(f"event seq {e.seq}: `source_seq` must be an integer or null, got {source!r}")
+    if isinstance(e, ToolCall) and not isinstance(e.args, dict):
+        raise ValueError(f"event seq {e.seq}: `args` must be an object, got {e.args!r}")
 
 
 def from_jsonl(text: str) -> Trace:
@@ -157,8 +243,12 @@ def from_jsonl(text: str) -> Trace:
     if not lines:
         raise ValueError("empty trace")
     header = json.loads(lines[0])
-    if header.get("type") != "trace":
+    if not isinstance(header, dict) or header.get("type") != "trace":
         raise ValueError("first line must be the `trace` header")
+    version = header.get("v", _BASE_VERSION)
+    if isinstance(version, int) and version > SCHEMA_VERSION:
+        raise ValueError(f"trace schema v{version} is newer than this bastiontrace reads "
+                         f"(<= v{SCHEMA_VERSION}); pip install -U bastiontrace")
     pol_raw = header.get("policy", {}) or {}
     policy = Policy(
         forbidden_tools=tuple(pol_raw.get("forbidden_tools", []) or []),
@@ -166,14 +256,22 @@ def from_jsonl(text: str) -> Trace:
     )
     events = tuple(_event_from_dict(json.loads(ln)) for ln in lines[1:])
     _validate_seqs(events)
+    _validate_edges(events)
     return Trace(
         trace_id=header.get("trace_id", ""),
         events=events,
         source=header.get("source", ""),
         canary=header.get("canary", ""),
         policy=policy,
-        v=header.get("v", SCHEMA_VERSION),
+        v=version if isinstance(version, int) else _BASE_VERSION,
+        provenance=_provenance(header.get("provenance", "explicit")),
     )
+
+
+def _provenance(value) -> str:
+    if value not in ("explicit", "inferred"):
+        raise ValueError(f"header `provenance` must be explicit or inferred, got {value!r}")
+    return value
 
 
 def _validate_seqs(events: Iterable[Event]) -> None:
@@ -186,6 +284,15 @@ def _validate_seqs(events: Iterable[Event]) -> None:
             raise ValueError(f"seq not increasing: {e.seq} after {last}")
         seen.add(e.seq)
         last = e.seq
+
+
+def _validate_edges(events: Iterable[Event]) -> None:
+    """Provenance only points backwards: an edge to the same or a later seq would
+    let a causal path run against time (and loop)."""
+    for e in events:
+        for src in edges_of(e):
+            if not isinstance(src, int) or src >= e.seq:
+                raise ValueError(f"event seq {e.seq}: provenance edge {src!r} must point to an earlier seq")
 
 
 # --- bastionprobe adapter ---------------------------------------------------
