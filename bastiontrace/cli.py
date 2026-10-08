@@ -51,8 +51,9 @@ def _fmt_event(trace: Trace, f: Finding, seq: int) -> str:
 
 
 def _print_human(trace: Trace, f: Finding) -> None:
+    contained = "  (contained: the fuse blocked the call)" if f.contained else ""
     print(f"\ntrace {trace.trace_id!r} (source={trace.source or '?'})  "
-          f"{_VERDICT_MARK.get(f.verdict, f.verdict)}")
+          f"{_VERDICT_MARK.get(f.verdict, f.verdict)}{contained}")
     for e in trace.events:
         print(_fmt_event(trace, f, e.seq))
     if f.inject_seq is not None:

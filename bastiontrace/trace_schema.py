@@ -33,6 +33,21 @@ class Policy:
 
 
 @dataclass(frozen=True)
+class Fuse:
+    """A bastionfuse trip, from the `fuse` header block of a trip snapshot.
+
+    The fuse writes its own decision here: which tripwire fired and why. The
+    honeytoken that caused the trip is NOT in the trace (the ring's args are
+    redacted before they are written), so this block is the only record of it —
+    hashes only, never the live token."""
+
+    rule: str = ""        # canary | honeytoken | decoy | protect | budget | ...
+    reason: str = ""
+    session_sha256: str = ""
+    honeytoken_sha256: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Message:
     seq: int
     role: str  # user | assistant | system
@@ -65,6 +80,9 @@ class ToolCall:
     # None = provenance unknown (fall back to token/pattern match).
     args_from: Optional[tuple[int, ...]] = None
     agent: str = ""  # v3: the agent that made this call
+    # What a runtime guard did with this call, when the trace comes from one:
+    # allowed | blocked | tripped (bastionfuse). "" = not recorded.
+    verdict: str = ""
     type: str = "tool_call"
 
 
@@ -135,6 +153,8 @@ class Trace:
     policy: Policy = field(default_factory=Policy)
     v: int = _BASE_VERSION
     provenance: str = "explicit"  # explicit | inferred (edges reconstructed, not recorded)
+    # Set when the trace is a bastionfuse trip snapshot (header `fuse` block).
+    fuse: Optional[Fuse] = None
 
     def by_seq(self, seq: int) -> Optional[Event]:
         for e in self.events:
@@ -160,6 +180,8 @@ class Trace:
             header["policy"] = pol
         if self.provenance != "explicit":
             header["provenance"] = self.provenance
+        if self.fuse is not None:
+            header["fuse"] = _drop_empty(asdict(self.fuse))
         lines = [json.dumps(header, ensure_ascii=False)]
         for e in self.events:
             lines.append(json.dumps(_drop_empty(asdict(e)), ensure_ascii=False))
@@ -217,7 +239,8 @@ def _event_from_dict(d: dict[str, Any]) -> Event:
     return event
 
 
-_STR_FIELDS = ("role", "content", "tool", "agent", "category", "tactic", "kind", "from_agent", "to_agent")
+_STR_FIELDS = ("role", "content", "tool", "agent", "category", "tactic", "kind",
+               "from_agent", "to_agent", "verdict")
 
 
 def _is_int(x) -> bool:
@@ -254,6 +277,7 @@ def from_jsonl(text: str) -> Trace:
         forbidden_tools=tuple(pol_raw.get("forbidden_tools", []) or []),
         canary_tokens=tuple(pol_raw.get("canary_tokens", []) or []),
     )
+    fuse = _fuse_from_header(header.get("fuse"))
     events = tuple(_event_from_dict(json.loads(ln)) for ln in lines[1:])
     _validate_seqs(events)
     _validate_edges(events)
@@ -265,7 +289,27 @@ def from_jsonl(text: str) -> Trace:
         policy=policy,
         v=version if isinstance(version, int) else _BASE_VERSION,
         provenance=_provenance(header.get("provenance", "explicit")),
+        fuse=fuse,
     )
+
+
+def _fuse_from_header(raw) -> Optional[Fuse]:
+    """Parse the `fuse` header block of a bastionfuse trip snapshot. Hostile
+    values fail as a ValueError naming the field, never a TypeError later."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"header `fuse` must be an object, got {raw!r}")
+    for name in ("rule", "reason", "session_sha256"):
+        if name in raw and not isinstance(raw[name], str):
+            raise ValueError(f"header `fuse.{name}` must be a string, got {raw[name]!r}")
+    hashes = raw.get("honeytoken_sha256", []) or []
+    if not isinstance(hashes, list) or not all(isinstance(h, str) for h in hashes):
+        raise ValueError("header `fuse.honeytoken_sha256` must be a list of strings, "
+                         f"got {hashes!r}")
+    return Fuse(rule=raw.get("rule", ""), reason=raw.get("reason", ""),
+                session_sha256=raw.get("session_sha256", ""),
+                honeytoken_sha256=tuple(hashes))
 
 
 def _provenance(value) -> str:

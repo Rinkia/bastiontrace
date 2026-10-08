@@ -64,13 +64,40 @@ harden` emits — the shield loads them either way.
 1. **inject point** — first tool output carrying a canary token or a known
    injection pattern.
 2. **landing** — first forbidden tool call (action) or leaked canary in a reply
-   (leak). Earliest wins.
+   (leak). Earliest wins. On a bastionfuse trip snapshot, the call the fuse
+   tripped on (fuse), reported with `contained` because the fuse blocked it.
 3. **causal path** — walks `args_from` provenance from landing back to inject
    (`linked`), or infers a direct edge when provenance is absent (`inferred`).
 4. **blast radius** — forward taint closure: every event the injection tainted.
 
 Verdicts: `LANDED`, `ATTEMPTED` (injection present, never reached an action),
 `CLEAN`.
+
+### bastionfuse trip snapshots
+
+[bastionfuse](https://github.com/Rinkia/bastionfuse) writes a trace every time a
+tripwire fires. Point `analyze` at one and it scores the trip:
+
+```
+$ bastiontrace analyze <fuse state dir>/trips/1760000000-ab12cd34ef.jsonl
+trace 'fuse-ab12cd34ef-1760000000' (source=bastionfuse)  [LANDED]  (contained: the fuse blocked the call)
+  #0   tool_call 'read_document' args={'path': 'notes.md'}
+  #1   tool_call 'http_post' args={'body': '[HONEYTOKEN]'}  <== LANDING (fuse)
+  landing: #1 - honeytoken #1a2b3c4d in the input of 'http_post'
+  note   : landing found but no inject site located; source unknown
+```
+
+The fuse's own recorded rule is read rather than re-derived: a snapshot carries
+only a *hash* of the honeytoken, never the live string, so there is nothing in
+the file to match on (and nothing to leak to whoever reads the report).
+
+Known ceilings, both inherent to what a snapshot holds:
+
+- **A landing, but no inject site and no causal path.** The ring holds tool calls
+  with redacted args, not the content the agent read. Analyze the agent's own
+  trace alongside the snapshot to get the path.
+- **`contained` reports what the fuse recorded**, it is not an independent check
+  that the call was blocked.
 
 ## Trace format
 
