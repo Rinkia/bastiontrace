@@ -4,6 +4,34 @@ All notable changes to bastiontrace are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - unreleased
+
+A bastionfuse trip is a landing.
+
+- **New landing kind `fuse`.** bastionfuse writes a trace on every trip; `analyze`
+  scored those files CLEAN unless the tripped tool happened to be a canary tool,
+  because the honeytoken that caused the trip is redacted out of the snapshot on
+  purpose. The containment leg's evidence now scores: the call with
+  `verdict:"tripped"` is the landing, with the fuse's own rule and reason as the
+  signal.
+- **`Finding.contained`.** True on a fuse landing: the payload reached a forbidden
+  action *and* the fuse blocked the call. The verdict stays `LANDED` (the existing
+  vocabulary is unchanged for consumers that enforce on it); the human report adds
+  `(contained: the fuse blocked the call)` and the JSON gains the field.
+- **Schema: a `fuse` header block** (`rule`, `reason`, `session_sha256`,
+  `honeytoken_sha256`) and an optional `verdict` on `tool_call`
+  (`allowed` | `blocked` | `tripped`). Both additive, both already written by
+  bastionfuse 0.1.0 and until now dropped on read. Hostile values raise a
+  `ValueError` naming the field. A trace without them is read, scored and
+  serialized exactly as before.
+- The fuse's decision is **read, not re-derived**: a snapshot carries only a hash
+  of the honeytoken, so there is nothing to match on, and a report that re-derived
+  it would risk echoing live decoy strings.
+- Known ceilings (README): a snapshot yields a landing but no inject site and no
+  causal path, because the ring holds calls with redacted args rather than the
+  content the agent read. `contained` reports what the fuse recorded; bastiontrace
+  does not verify the block independently.
+
 ## [0.5.0] - 2026-09-30
 
 Multi-agent forensics — schema **v2 → v3** (additive) — and an OpenTelemetry import.

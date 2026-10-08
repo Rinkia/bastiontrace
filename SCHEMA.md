@@ -41,6 +41,7 @@ what they don't know.
 | `canary` |  | primary canary token, if any (shorthand for the first of `policy.canary_tokens`) |
 | `policy.forbidden_tools` |  | tool names the agent must not call. A call to one = landing. |
 | `policy.canary_tokens` |  | secret tokens that must not leak. Echo in a reply = landing. |
+| `fuse` |  | a **bastionfuse trip** record (see below). Its presence makes the tripped call the landing. |
 
 `policy` is what makes a trace *scorable*. No policy → bastiontrace can still
 locate injection patterns, but can't decide "did it land" beyond corpus match.
@@ -103,6 +104,7 @@ landing**.
 | `tool` | ✓ | tool invoked |
 | `args` |  | call arguments (object) |
 | `args_from` |  | list of `seq`s this call's args derive from — the **taint edges** |
+| `verdict` |  | what a runtime guard did with this call: `allowed` \| `blocked` \| `tripped`. Omit when no guard was in the loop. |
 
 `args_from` is the spine of the analysis. If the emitter can't compute
 provenance, set it `null`; bastiontrace falls back to matching canary tokens
@@ -112,11 +114,44 @@ and corpus patterns across earlier `tool_result` contents.
 
 1. **inject point** — first `tool_result` or `memory` note whose `content`
    carries a canary token or matches a corpus pattern.
-2. **landing** — first `tool_call` in `policy.forbidden_tools`, or a
-   `canary_token` echoed in an assistant `message`.
+2. **landing** — first `tool_call` in `policy.forbidden_tools` (kind `action`), or a
+   `canary_token` echoed in an assistant `message` (kind `leak`). On a trip snapshot
+   (a `fuse` header) the call with `verdict:"tripped"` wins instead, kind `fuse`.
 3. **causal path** — walk `args_from` backward from landing to inject.
 4. **blast radius** — taint set: inject `seq` plus every event reachable
    forward through `args_from`.
+
+## `fuse` — a bastionfuse trip snapshot
+
+bastionfuse writes one of these every time a tripwire fires: the session's forensic
+ring as `tool_call` events, plus its own decision in the header.
+
+```json
+{"type":"trace","v":1,"trace_id":"fuse-ab12cd34ef-1760000000","source":"bastionfuse",
+ "policy":{"forbidden_tools":["debug_dump_env"]},
+ "fuse":{"rule":"honeytoken",
+         "reason":"honeytoken #1a2b3c4d in the input of 'http_post'",
+         "session_sha256":"ab12cd34ef","honeytoken_sha256":["0f1e2d3c4b5a"]}}
+```
+
+| field | req | meaning |
+|-------|-----|---------|
+| `rule` |  | the tripwire that fired: `canary`, `honeytoken`, `decoy`, `protect`, a budget… |
+| `reason` |  | the fuse's own operator-facing explanation, recorded verbatim |
+| `session_sha256` |  | truncated hash of the session id (the id itself is never written) |
+| `honeytoken_sha256` |  | truncated hashes of the policy's honeytokens |
+
+The call with `verdict:"tripped"` is the landing, and the finding carries
+`contained: true`: the payload reached a forbidden action **and the fuse blocked it**.
+
+Two things a snapshot does **not** carry, by design:
+
+- **the honeytoken itself.** The ring's args are redacted before they are written, so
+  a snapshot never hands its reader a list of live decoy strings. `rule` and the hashes
+  are the whole record, which is why the fuse's decision is read rather than re-derived.
+- **the content the agent read.** The ring holds calls, not `tool_result`s, so there is
+  no inject site and no `args_from` to walk. Expect "source unknown", and analyze the
+  agent's own trace alongside the snapshot to get the path.
 
 ## v3 — multi-agent
 

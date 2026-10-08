@@ -4,7 +4,8 @@ Four derivations (see SCHEMA.md):
   1. inject point  - first content an agent READ (tool_result, memory note, or a
                      v3 agent_message) carrying a canary token or a corpus pattern.
   2. landing       - first forbidden tool_call (action) or leaked canary in a
-                     reply (leak). Earliest wins.
+                     reply (leak). Earliest wins. On a bastionfuse trip snapshot,
+                     the call the fuse tripped on (fuse), which it blocked.
   3. causal path   - walk provenance edges (args_from / source_seq / derived_from)
                      backward from landing to inject.
   4. blast radius  - forward taint closure over the same edges from the inject.
@@ -69,8 +70,10 @@ class Finding:
     inject_seq: Optional[int] = None
     inject_signal: str = ""        # why this event is the inject site
     landing_seq: Optional[int] = None
-    landing_kind: str = ""         # "action" (forbidden call) | "leak" (canary echo)
+    # "action" (forbidden call) | "leak" (canary echo) | "fuse" (a bastionfuse trip)
+    landing_kind: str = ""
     landing_signal: str = ""
+    contained: bool = False        # a runtime guard blocked the landing call (fuse trip)
     causal_path: tuple[int, ...] = ()   # inject_seq ... landing_seq
     linked: bool = False           # True = path proven via recorded provenance, not inferred
     blast_radius: tuple[int, ...] = ()  # every event tainted by the inject
@@ -136,18 +139,42 @@ def _find_inject(trace: Trace) -> tuple[Optional[int], str, object]:
     return None, "", None
 
 
-def _find_landing(trace: Trace) -> tuple[Optional[int], str, str]:
-    """Earliest landing across both kinds. Returns (seq, kind, signal)."""
+def _find_fuse_landing(trace: Trace) -> Optional[tuple[int, str, str, bool]]:
+    """A bastionfuse trip snapshot: the call the fuse tripped on is the landing.
+
+    The fuse's own recorded decision outranks our forbidden-tool inference over
+    the same event: it names the tripwire (honeytoken, decoy taint, budget),
+    which a tool-name match cannot, and for most rules there is nothing in the
+    trace left to match on (the ring's args are redacted). The reason text is
+    the fuse's, which already carries only a honeytoken *hash*, never the token."""
+    if trace.fuse is None:
+        return None
+    for e in trace.events:
+        if isinstance(e, ToolCall) and e.verdict == "tripped":
+            rule = trace.fuse.rule or "fuse"
+            reason = trace.fuse.reason or f"tripwire fired on {e.tool!r}"
+            # The fuse's operator-facing reason usually names the rule already;
+            # don't say it twice.
+            signal = reason if rule.lower() in reason.lower() else f"{rule} tripwire: {reason}"
+            return e.seq, "fuse", signal, True
+    return None
+
+
+def _find_landing(trace: Trace) -> tuple[Optional[int], str, str, bool]:
+    """Earliest landing across the kinds. Returns (seq, kind, signal, contained)."""
+    fuse = _find_fuse_landing(trace)
+    if fuse is not None:
+        return fuse
     forbidden = set(trace.policy.forbidden_tools)
     tokens = tuple(trace.policy.canary_tokens) or ((trace.canary,) if trace.canary else ())
     for e in trace.events:  # events are seq-ordered, so the first hit is the earliest
         if isinstance(e, ToolCall) and e.tool in forbidden:
-            return e.seq, "action", f"called forbidden tool {e.tool!r}"
+            return e.seq, "action", f"called forbidden tool {e.tool!r}", False
         if isinstance(e, Message) and e.role == "assistant":
             for tok in tokens:
                 if tok and tok in e.content:
-                    return e.seq, "leak", f"canary token {tok!r} echoed in reply"
-    return None, "", ""
+                    return e.seq, "leak", f"canary token {tok!r} echoed in reply", False
+    return None, "", "", False
 
 
 def _causal_path(ix: _Index, inject_seq: int, landing_seq: int) -> tuple[tuple[int, ...], bool]:
@@ -219,7 +246,7 @@ def _replicated(trace: Trace, matcher, blast: tuple[int, ...]) -> bool:
 
 def analyze(trace: Trace) -> Finding:
     inject_seq, inject_signal, matcher = _find_inject(trace)
-    landing_seq, landing_kind, landing_signal = _find_landing(trace)
+    landing_seq, landing_kind, landing_signal, contained = _find_landing(trace)
     ix = _Index(trace)
     inferred = trace.provenance != "explicit"
     notes: list[str] = []
@@ -249,6 +276,7 @@ def analyze(trace: Trace) -> Finding:
             landing_seq=landing_seq,
             landing_kind=landing_kind,
             landing_signal=landing_signal,
+            contained=contained,
             causal_path=(landing_seq,),
             blast_radius=(landing_seq,),
             notes=tuple(notes),
@@ -262,6 +290,7 @@ def analyze(trace: Trace) -> Finding:
             landing_seq=landing_seq,
             landing_kind=landing_kind,
             landing_signal=landing_signal,
+            contained=contained,
             causal_path=(landing_seq,),
             blast_radius=(landing_seq,),
             notes=tuple(notes),
@@ -278,6 +307,7 @@ def analyze(trace: Trace) -> Finding:
         landing_seq=landing_seq,
         landing_kind=landing_kind,
         landing_signal=landing_signal,
+        contained=contained,
         causal_path=path,
         linked=linked and not inferred,
         blast_radius=blast,
