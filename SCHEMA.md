@@ -142,7 +142,14 @@ ring as `tool_call` events, plus its own decision in the header.
 | `honeytoken_sha256` |  | truncated hashes of the policy's honeytokens |
 
 The call with `verdict:"tripped"` is the landing, and the finding carries
-`contained: true`: the payload reached a forbidden action **and the fuse blocked it**.
+`contained: true`: the payload reached a forbidden action and the trace records the fuse as
+having blocked it.
+
+Two caveats, both since 0.6.1. The trip wins only when it is the **earliest** landing: a fuse
+blocks the call it trips on and vouches for nothing before it, so an unblocked forbidden call at
+a lower seq is the landing instead, with `contained: false` and a note about the later trip. And
+a `fuse` block with **no** call marked `tripped` yields `ATTEMPTED` with `fuse_unresolved: true`,
+since a snapshot exists only because something fired.
 
 Two things a snapshot does **not** carry, by design:
 

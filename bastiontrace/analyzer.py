@@ -74,6 +74,9 @@ class Finding:
     landing_kind: str = ""
     landing_signal: str = ""
     contained: bool = False        # a runtime guard blocked the landing call (fuse trip)
+    # A trip snapshot whose tripped call isn't in the trace (truncated/evicted ring):
+    # something fired, we just can't point at it. Never report that as CLEAN.
+    fuse_unresolved: bool = False
     causal_path: tuple[int, ...] = ()   # inject_seq ... landing_seq
     linked: bool = False           # True = path proven via recorded provenance, not inferred
     blast_radius: tuple[int, ...] = ()  # every event tainted by the inject
@@ -88,7 +91,7 @@ class Finding:
     def verdict(self) -> str:
         if self.landed:
             return "LANDED"
-        if self.inject_seq is not None:
+        if self.inject_seq is not None or self.fuse_unresolved:
             return "ATTEMPTED"  # inject present, never reached a forbidden action
         return "CLEAN"
 
@@ -160,21 +163,49 @@ def _find_fuse_landing(trace: Trace) -> Optional[tuple[int, str, str, bool]]:
     return None
 
 
-def _find_landing(trace: Trace) -> tuple[Optional[int], str, str, bool]:
-    """Earliest landing across the kinds. Returns (seq, kind, signal, contained)."""
-    fuse = _find_fuse_landing(trace)
-    if fuse is not None:
-        return fuse
+def _scan_landing(trace: Trace) -> Optional[tuple[int, str, str]]:
+    """Earliest forbidden call (action) or canary echo (leak), by seq."""
     forbidden = set(trace.policy.forbidden_tools)
     tokens = tuple(trace.policy.canary_tokens) or ((trace.canary,) if trace.canary else ())
     for e in trace.events:  # events are seq-ordered, so the first hit is the earliest
         if isinstance(e, ToolCall) and e.tool in forbidden:
-            return e.seq, "action", f"called forbidden tool {e.tool!r}", False
+            return e.seq, "action", f"called forbidden tool {e.tool!r}"
         if isinstance(e, Message) and e.role == "assistant":
             for tok in tokens:
                 if tok and tok in e.content:
-                    return e.seq, "leak", f"canary token {tok!r} echoed in reply", False
-    return None, "", "", False
+                    return e.seq, "leak", f"canary token {tok!r} echoed in reply"
+    return None
+
+
+def _find_landing(trace: Trace) -> tuple[Optional[int], str, str, bool, tuple[str, ...]]:
+    """Earliest landing across every kind. Returns (seq, kind, signal, contained, notes).
+
+    A fuse trip does NOT short-circuit the scan. The fuse blocked the call it
+    tripped on; it cannot vouch for calls it allowed *earlier*, so an unblocked
+    landing that precedes the trip still wins and `contained` stays False.
+    Reporting it as contained would tell a reader the exfil was stopped when it
+    was not."""
+    fuse = _find_fuse_landing(trace)
+    scan = _scan_landing(trace)
+    notes: list[str] = []
+
+    if fuse is not None and scan is not None:
+        fuse_seq, scan_seq = fuse[0], scan[0]
+        if scan_seq < fuse_seq:
+            # The fuse tripped later. Say so: the trip is real, it just arrived
+            # after this landing, and a reader must not read it as containment.
+            notes.append(f"the fuse tripped later, at #{fuse_seq} ({fuse[2]}); "
+                         f"it did not block this landing")
+            return scan_seq, scan[1], scan[2], False, tuple(notes)
+        # Same seq (a tripped call that is also a forbidden tool) or the trip is
+        # earlier: the fuse's own rule and reason are the better signal.
+        return (*fuse, tuple(notes))
+
+    if fuse is not None:
+        return (*fuse, tuple(notes))
+    if scan is not None:
+        return (*scan, False, tuple(notes))
+    return None, "", "", False, tuple(notes)
 
 
 def _causal_path(ix: _Index, inject_seq: int, landing_seq: int) -> tuple[tuple[int, ...], bool]:
@@ -246,10 +277,18 @@ def _replicated(trace: Trace, matcher, blast: tuple[int, ...]) -> bool:
 
 def analyze(trace: Trace) -> Finding:
     inject_seq, inject_signal, matcher = _find_inject(trace)
-    landing_seq, landing_kind, landing_signal, contained = _find_landing(trace)
+    landing_seq, landing_kind, landing_signal, contained, landing_notes = _find_landing(trace)
     ix = _Index(trace)
     inferred = trace.provenance != "explicit"
-    notes: list[str] = []
+    notes: list[str] = list(landing_notes)
+    # Unresolved means the trip itself cannot be located: a `fuse` block with no
+    # call marked "tripped" anywhere. A trip that IS recorded but lost the
+    # earliest-landing comparison is not unresolved — _find_landing already
+    # noted where it was.
+    fuse_unresolved = trace.fuse is not None and _find_fuse_landing(trace) is None
+    if fuse_unresolved:
+        notes.append("trace carries a fuse trip block but no call is marked tripped: the ring "
+                     "was truncated or the call was evicted, so the trip cannot be located")
     if inferred:
         notes.append("provenance inferred from OTel span tree (edges reconstructed, not recorded)")
 
@@ -263,7 +302,7 @@ def analyze(trace: Trace) -> Finding:
             notes.append("no forbidden action or canary leak found")
         # blast_radius stays () when nothing landed (unchanged v2 contract)
         return Finding(landed=False, inject_seq=inject_seq, inject_signal=inject_signal,
-                       notes=tuple(notes), **cascade)
+                       fuse_unresolved=fuse_unresolved, notes=tuple(notes), **cascade)
 
     if inject_seq is not None and landing_seq < inject_seq:
         # The forbidden action happened before the first located injection: it was
@@ -277,6 +316,7 @@ def analyze(trace: Trace) -> Finding:
             landing_kind=landing_kind,
             landing_signal=landing_signal,
             contained=contained,
+            fuse_unresolved=fuse_unresolved,
             causal_path=(landing_seq,),
             blast_radius=(landing_seq,),
             notes=tuple(notes),
@@ -291,6 +331,7 @@ def analyze(trace: Trace) -> Finding:
             landing_kind=landing_kind,
             landing_signal=landing_signal,
             contained=contained,
+            fuse_unresolved=fuse_unresolved,
             causal_path=(landing_seq,),
             blast_radius=(landing_seq,),
             notes=tuple(notes),
@@ -308,6 +349,7 @@ def analyze(trace: Trace) -> Finding:
         landing_kind=landing_kind,
         landing_signal=landing_signal,
         contained=contained,
+        fuse_unresolved=fuse_unresolved,
         causal_path=path,
         linked=linked and not inferred,
         blast_radius=blast,

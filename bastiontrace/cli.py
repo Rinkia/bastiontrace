@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -25,8 +26,30 @@ _CAPTURE_HINT = ("enable content capture in your OTel GenAI instrumentation "
 _VERDICT_MARK = {"LANDED": "[LANDED]", "ATTEMPTED": "[attempted]", "CLEAN": "[clean]"}
 
 
-def _fmt_event(trace: Trace, f: Finding, seq: int) -> str:
-    e = trace.by_seq(seq)
+_CTRL = re.compile("[\x00-\x1f\x7f-\x9f]")
+
+
+def _safe(value, cap: int = 300) -> str:
+    """Make a trace-controlled string safe to print on one line.
+
+    Everything in a trace is content an agent READ, so an attacker may control
+    it. Printed raw, such a string can forge report lines (an embedded newline
+    plus `  note   : ...`) or emit terminal escape sequences. Control characters
+    become visible escapes, undecodable surrogates are replaced, and the result
+    is capped so one huge field can't bury the report. The JSON output needs
+    none of this: `json.dumps` escapes control characters itself."""
+    text = value if isinstance(value, str) else str(value)
+    text = text.encode("utf-8", "replace").decode("utf-8")
+    text = _CTRL.sub(lambda m: "\\x%02x" % ord(m.group()), text)
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"...[+{len(text) - cap} chars]"
+
+
+def _fmt_event(trace: Trace, f: Finding, seq: int, by_seq: dict | None = None) -> str:
+    # by_seq: prebuilt index. trace.by_seq() is a linear scan, so calling it per
+    # event made printing O(n^2) and a 100k-event trace take minutes.
+    e = by_seq.get(seq) if by_seq is not None else trace.by_seq(seq)
     tag = ""
     if seq == f.inject_seq:
         tag = "  <== INJECT"
@@ -35,31 +58,36 @@ def _fmt_event(trace: Trace, f: Finding, seq: int) -> str:
     elif seq in f.blast_radius:
         tag = "  .. tainted"
     if isinstance(e, Message):
-        body = f"{e.role}: {e.content[:80]}"
+        body = f"{_safe(e.role, 40)}: {_safe(e.content, 80)}"
     elif isinstance(e, ToolResult):
-        body = f"tool_result {e.tool!r}: {e.content[:70]}"
+        body = f"tool_result {e.tool!r}: {_safe(e.content, 70)}"
     elif isinstance(e, MemoryNote):
-        body = f"memory({e.kind}): {e.content[:66]}"
+        body = f"memory({_safe(e.kind, 20)}): {_safe(e.content, 66)}"
     elif isinstance(e, ToolCall):
-        body = f"tool_call {e.tool!r} args={e.args}"
+        body = f"tool_call {e.tool!r} args={_safe(e.args, 120)}"
     elif isinstance(e, AgentMessage):
-        body = f"{e.kind} {e.from_agent} -> {e.to_agent}: {e.content[:60]}"
+        body = (f"{_safe(e.kind, 20)} {_safe(e.from_agent, 40)} -> {_safe(e.to_agent, 40)}: "
+                f"{_safe(e.content, 60)}")
     else:
-        body = str(e)
-    who = getattr(e, "agent", "") if not isinstance(e, AgentMessage) else ""
+        body = _safe(e, 160)
+    who = _safe(getattr(e, "agent", ""), 40) if not isinstance(e, AgentMessage) else ""
     return f"  #{seq:<3} {'[' + who + '] ' if who else ''}{body}{tag}"
 
 
 def _print_human(trace: Trace, f: Finding) -> None:
-    contained = "  (contained: the fuse blocked the call)" if f.contained else ""
-    print(f"\ntrace {trace.trace_id!r} (source={trace.source or '?'})  "
+    # Deliberately hedged: the `fuse` block is a field in the file, and whoever
+    # wrote the file wrote it. Say what the trace records, not what we verified.
+    contained = "  (contained: the trace's fuse block records this call as blocked)" \
+        if f.contained else ""
+    print(f"\ntrace {trace.trace_id!r} (source={_safe(trace.source, 60) or '?'})  "
           f"{_VERDICT_MARK.get(f.verdict, f.verdict)}{contained}")
+    by_seq = {e.seq: e for e in trace.events}
     for e in trace.events:
-        print(_fmt_event(trace, f, e.seq))
+        print(_fmt_event(trace, f, e.seq, by_seq))
     if f.inject_seq is not None:
-        print(f"\n  inject : #{f.inject_seq} - {f.inject_signal}")
+        print(f"\n  inject : #{f.inject_seq} - {_safe(f.inject_signal)}")
     if f.landing_seq is not None:
-        print(f"  landing: #{f.landing_seq} - {f.landing_signal}")
+        print(f"  landing: #{f.landing_seq} - {_safe(f.landing_signal)}")
     if f.causal_path:
         link = "linked" if f.linked else "inferred"
         print(f"  path   : {' -> '.join('#' + str(s) for s in f.causal_path)}  ({link})")
@@ -68,9 +96,10 @@ def _print_human(trace: Trace, f: Finding) -> None:
     if f.agents_reached:
         extra = f", {f.hops} hop(s)" if f.landed else ""
         worm = ", replicated by 2+ agents (worm signal)" if f.replicated else ""
-        print(f"  cascade: {' -> '.join(f.agents_reached)}  (patient zero: {f.patient_zero}{extra}{worm})")
+        print(f"  cascade: {' -> '.join(_safe(a, 40) for a in f.agents_reached)}  "
+              f"(patient zero: {_safe(f.patient_zero, 40)}{extra}{worm})")
     for n in f.notes:
-        print(f"  note   : {n}")
+        print(f"  note   : {_safe(n, 400)}")
 
 
 def _example_dir():

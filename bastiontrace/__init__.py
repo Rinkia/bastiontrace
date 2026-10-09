@@ -20,7 +20,7 @@ from .trace_schema import (
     from_jsonl,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 __all__ = [
     "analyze",

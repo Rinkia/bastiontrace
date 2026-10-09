@@ -4,6 +4,42 @@ All notable changes to bastiontrace are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-09
+
+Fixes from an independent security review of 0.6.0. **Anyone analyzing fuse trip
+snapshots with 0.6.0 should upgrade:** it could report a real, unblocked exfiltration as
+contained.
+
+- **A fuse trip no longer masks an earlier, unblocked landing** (the serious one). 0.6.0
+  returned the fuse landing without comparing seqs, so a `send_email` that actually went
+  out at `#1`, followed by a harmless call that tripped the fuse at `#2`, reported
+  `LANDED (contained)` with the exfil left unmarked. A fuse blocks the call it trips on;
+  it cannot vouch for calls it allowed earlier. Earliest-wins now holds across all three
+  kinds, `contained` is only claimed for the landing the fuse actually blocked, and a
+  later trip is reported as a note ("the fuse tripped later, at #N; it did not block this
+  landing"). No attacker needed — any exfil that succeeded before a trip hit this.
+- **The human report can no longer be forged by trace content.** Every
+  attacker-influenceable string it prints (the fuse `reason`, tool-result content, agent
+  names, notes, `source`, args) goes through one escaper: control characters become
+  visible escapes and each field is capped. A `reason` containing a newline could
+  previously print its own `note   :` / `blast  :` lines and emit terminal escape
+  sequences (clear-screen, set-window-title). The JSON output was never affected.
+- **A `fuse` block with no call marked `tripped` is no longer silently CLEAN.** A snapshot
+  exists only because a tripwire fired, so an unlocatable trip (truncated or evicted ring)
+  now reports `ATTEMPTED` with `Finding.fuse_unresolved` and a note, instead of nothing.
+- **Hostile header values raise `ValueError` naming the field**, as the schema contract
+  always promised: non-object `policy` (was `AttributeError`), non-list or nested
+  `forbidden_tools` / `canary_tokens` (was an unnamed `TypeError` from `set()`), non-string
+  `canary` / `trace_id` / `source`, and lone surrogates anywhere (they survive JSON parsing
+  and then crash printing). A string `forbidden_tools` is refused rather than silently split
+  into single-character tool names, which had made a real landing read as CLEAN. The CLI
+  reports these as exit 2 (bad input), never a traceback — exit 1 means LANDED.
+- **The "contained" wording is hedged to what the trace proves**: "the trace's fuse block
+  records this call as blocked". The block is a field in a file, and whoever wrote the file
+  wrote it; nothing here verifies it. Snapshots are not signed (noted in Limits).
+- Printing is no longer O(n²): the event index is built once instead of a linear scan per
+  event, and oversized `args` are capped.
+
 ## [0.6.0] - 2026-10-08
 
 A bastionfuse trip is a landing.
