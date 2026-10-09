@@ -91,13 +91,38 @@ The fuse's own recorded rule is read rather than re-derived: a snapshot carries
 only a *hash* of the honeytoken, never the live string, so there is nothing in
 the file to match on (and nothing to leak to whoever reads the report).
 
-Known ceilings, both inherent to what a snapshot holds:
+Known ceilings:
 
 - **A landing, but no inject site and no causal path.** The ring holds tool calls
   with redacted args, not the content the agent read. Analyze the agent's own
   trace alongside the snapshot to get the path.
-- **`contained` reports what the fuse recorded**, it is not an independent check
-  that the call was blocked.
+- **`contained` is what the trace *records*, not an independent check.** The `fuse`
+  block is a field in the file, and whoever wrote the file wrote it. Snapshots
+  carry no signature, so a trace is not authenticated end to end. The report says
+  "the trace's fuse block records this call as blocked" for that reason.
+- **A fuse blocks the call it trips on, and vouches for nothing earlier.** If an
+  unblocked forbidden call precedes the trip, that call is the landing and
+  `contained` is false; the trip is reported as a note. (Before 0.6.1 the trip won
+  regardless of order, so a real exfiltration could be reported as contained.)
+- **A `fuse` block with no call marked `tripped`** — a truncated or evicted ring —
+  reports `ATTEMPTED` with `fuse_unresolved`, because a snapshot exists only if
+  something fired, but the trip cannot be pointed at.
+
+## Trusting a trace
+
+A trace is **attacker-influenceable input**. Everything in it is content an agent
+read: web pages, documents, MCP tool results, messages from other agents. Treat an
+analysis as evidence about a file, not as an authenticated account of a run.
+
+- Hostile values are refused at load with a `ValueError` naming the field, and the
+  CLI exits **2** for bad input. Exit **1** means LANDED, so a crash can never be
+  mistaken for a finding.
+- Strings printed in the human report are escaped and capped, so trace content
+  cannot forge report lines or emit terminal escape sequences. `--format json` is
+  escaped by the JSON encoder.
+- Whoever writes a trace controls its `policy` and its `fuse` block, so they can
+  make an innocent run look LANDED. They cannot make a landing look CLEAN: an
+  absent or `allowed` verdict falls through to the full scan.
 
 ## Trace format
 
